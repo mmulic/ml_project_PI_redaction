@@ -3,46 +3,40 @@ import ast
 import numpy as np
 import pandas as pd
 
-# Each pattern maps a PII label to its regex. Order matters: more specific
-# patterns (e.g. IBAN) are checked before generic number patterns.
+# Labels match the dataset's actual classes. Only classes with a feasible
+# regex pattern are included — free-text classes (GIVENNAME, LASTNAME, CITY,
+# STATE, COUNTRY, STREET, SEX, TITLE) cannot be reliably caught by regex.
 PII_PATTERNS = {
-    # --- Structured identifiers ---
-    "EMAIL":             r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b',
-    "URL":               r'https?://[^\s/$.?#][^\s]*',
-    "IPV6":              r'\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b',
-    "IPV4":              r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b',
-
-    # --- Financial ---
-    "IBAN":              r'\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){1,7}\b',
-    "CREDITCARDNUMBER":  r'\b(?:\d{4}[-\s]?){3}\d{4}\b',
-    "CREDITCARDCVV":     r'\bCVV\s*:?\s*\d{3,4}\b',
-    "BITCOINADDRESS":    r'\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b',
-
-    # --- Government / official IDs ---
-    "SSN":               r'\b\d{3}[-\s]\d{2}[-\s]\d{4}\b',
-    "IDNUMBER":          r'\b[A-Z]{0,2}\d{6,9}\b',
-    "VEHICLEPLATE":      r'\b[A-Z]{1,3}[-\s]?\d{1,4}[-\s]?[A-Z]{0,3}\b',
-    "UKINSURANCENUMBER": r'\b[A-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-Z]\b',
-
     # --- Contact ---
-    "PHONENUMBER":       r'\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b',
-    "PHONEIMEI":         r'\b\d{15}\b',
+    "EMAIL":         r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b',
+    "TEL":           r'\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b',
+
+    # --- Network ---
+    # Covers both IPv4 and IPv6 under the dataset's single IP label
+    "IP":            r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b'
+                     r'|\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b',
 
     # --- Date / time ---
-    "DATE":              r'\b(?:\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2}|\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})\b',
-    "TIME":              r'\b\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APap][Mm])?\b',
+    "DATE":          r'\b(?:\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2}|\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})\b',
+    "BOD":           r'\b(?:\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2}|\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})\b',
+    "TIME":          r'\b\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APap][Mm])?\b',
 
     # --- Location ---
-    "ZIPCODE":           r'\b\d{5}(?:-\d{4})?\b',
-    "GPS":               r'-?\d{1,3}\.\d{3,},\s*-?\d{1,3}\.\d{3,}',
+    # POSTCODE covers US ZIP (12345 / 12345-6789) and UK postcodes (SW1A 1AA)
+    "POSTCODE":      r'\b[A-Z]{1,2}\d{1,2}[A-Z]?\s?\d[A-Z]{2}\b|\b\d{5}(?:-\d{4})?\b',
+    "GEOCOORD":      r'-?\d{1,3}\.\d{3,},\s*-?\d{1,3}\.\d{3,}',
+    "BUILDING":      r'\b\d{1,5}[A-Za-z]?\b',
+    "SECADDRESS":    r'(?i)\b(?:apt|apartment|suite|ste|unit|floor|fl|room|rm)\.?\s*[\w\-]+\b',
+
+    # --- IDs & documents ---
+    "SOCIALNUMBER":  r'\b\d{3}[-\s]\d{2}[-\s]\d{4}\b',
+    "PASSPORT":      r'\b[A-Z]{1,2}\d{6,9}\b',
+    "DRIVERLICENSE": r'\b[A-Z]{1,2}\d{6,8}[A-Z]?\b',
+    "IDCARD":        r'\b[A-Z]{0,2}\d{6,9}\b',
 
     # --- Credentials ---
-    "PIN":               r'\bPIN\s*:?\s*\d{4,6}\b',
-    "PASSWORD":          r'(?i)password\s*:?\s*\S+',
-    "USERNAME":          r'(?i)username\s*:?\s*\S+',
-
-    # --- Amounts ---
-    "AMOUNT":            r'\b\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?\s*(?:USD|EUR|GBP|CAD|AUD|CHF|JPY|MXN|BRL)?\b',
+    "USERNAME":      r'(?i)\busername\s*:?\s*\S+',
+    "PASS":          r'(?i)\bpassword\s*:?\s*\S+',
 }
 
 
