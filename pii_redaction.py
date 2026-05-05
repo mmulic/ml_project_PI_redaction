@@ -7,34 +7,26 @@ import pandas as pd
 # regex pattern are included — free-text classes (GIVENNAME, LASTNAME, CITY,
 # STATE, COUNTRY, STREET, SEX, TITLE) cannot be reliably caught by regex.
 PII_PATTERNS = {
-    # --- Contact ---
     "EMAIL":         r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b',
     "TEL":           r'\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b',
 
-    # --- Network ---
-    # Covers both IPv4 and IPv6 under the dataset's single IP label
     "IP":            r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b'
                      r'|\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b',
 
-    # --- Date / time ---
     "DATE":          r'\b(?:\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2}|\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})\b',
     "BOD":           r'\b(?:\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2}|\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})\b',
     "TIME":          r'\b\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APap][Mm])?\b',
 
-    # --- Location ---
-    # POSTCODE covers US ZIP (12345 / 12345-6789) and UK postcodes (SW1A 1AA)
     "POSTCODE":      r'\b[A-Z]{1,2}\d{1,2}[A-Z]?\s?\d[A-Z]{2}\b|\b\d{5}(?:-\d{4})?\b',
     "GEOCOORD":      r'-?\d{1,3}\.\d{3,},\s*-?\d{1,3}\.\d{3,}',
     "BUILDING":      r'\b\d{1,5}[A-Za-z]?\b',
     "SECADDRESS":    r'(?i)\b(?:apt|apartment|suite|ste|unit|floor|fl|room|rm)\.?\s*[\w\-]+\b',
 
-    # --- IDs & documents ---
     "SOCIALNUMBER":  r'\b\d{3}[-\s]\d{2}[-\s]\d{4}\b',
     "PASSPORT":      r'\b[A-Z]{1,2}\d{6,9}\b',
     "DRIVERLICENSE": r'\b[A-Z]{1,2}\d{6,8}[A-Z]?\b',
     "IDCARD":        r'\b[A-Z]{0,2}\d{6,9}\b',
 
-    # --- Credentials ---
     "USERNAME":      r'(?i)\busername\s*:?\s*\S+',
     "PASS":          r'(?i)\bpassword\s*:?\s*\S+',
 }
