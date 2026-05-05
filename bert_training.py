@@ -231,9 +231,9 @@ if __name__ == "__main__":
     training_args = TrainingArguments(
         output_dir=str(model_output_dir),
         num_train_epochs=1,
-        per_device_train_batch_size=32 if device.type == "cuda" else 16,  # Smaller for CPU
-        per_device_eval_batch_size=32 if device.type == "cuda" else 16,
-        gradient_accumulation_steps=2 if device.type == "cuda" else 1,  # Simulate larger batch
+        per_device_train_batch_size=32 if device.type == "cuda" else 4,  # Smaller for CPU
+        per_device_eval_batch_size=32 if device.type == "cuda" else 4,
+        gradient_accumulation_steps=2 if device.type == "cuda" else 2,  # Simulate larger batch
         eval_strategy="epoch",
         save_strategy="epoch",
         learning_rate=2e-5,
