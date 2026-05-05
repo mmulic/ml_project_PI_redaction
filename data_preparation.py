@@ -13,12 +13,17 @@ import pandas as pd
 import ast
 import json
 from pathlib import Path
+from transformers import AutoTokenizer
+import time
+
+# Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained(
+    "distilbert-base-multilingual-cased",
+    use_fast=True
+)
+print(type(tokenizer))
 
 def parse_span_labels(x):
-    """
-    Convert the span_labels string into a list of tuples.
-    Each tuple is (start_char, end_char, entity_type)
-    """
     if pd.isna(x):
         return []
     if isinstance(x, str):
@@ -29,108 +34,94 @@ def parse_span_labels(x):
     return x
 
 
-def character_spans_to_bio_labels(text, spans):
+
+def tokenize_and_align_labels(text, spans):
     """
-    Convert character-level spans to token-level BIO labels.
-    
+    Tokenize text using DistilBERT tokenizer and align BIO labels.
+
     Args:
-        text: The raw text
-        spans: List of (start_char, end_char, entity_type) tuples
-    
+        text: raw string
+        spans: list of (start_char, end_char, label)
+
     Returns:
-        tokens: List of tokens
-        bio_labels: List of BIO labels (same length as tokens)
+        tokens: list of tokens
+        bio_labels: list of BIO labels
     """
-    
-    # Split text into words (simple tokenization)
-    # In a real project, you'd use a proper tokenizer like BERT's
-    tokens = text.split()
+
+    encoding = tokenizer(
+        text,
+        return_offsets_mapping=True,
+        truncation=True,
+        padding=False
+    )
+
+    offsets = encoding["offset_mapping"]
+    input_ids = encoding["input_ids"]
+
+    tokens = tokenizer.convert_ids_to_tokens(input_ids)
     bio_labels = ["O"] * len(tokens)
-    
-    # Map each character to its token index
-    char_to_token = {}
-    char_pos = 0
-    for token_idx, token in enumerate(tokens):
-        # Account for the space between tokens
-        while char_pos < len(text) and text[char_pos] == ' ':
-            char_to_token[char_pos] = -1  # Space character
-            char_pos += 1
-        
-        # Map characters of this token
-        for i in range(len(token)):
-            char_to_token[char_pos] = token_idx
-            char_pos += 1
-    
-    # For each span, mark the corresponding tokens
-    for start_char, end_char, entity_type in spans:
-        first_token = True
-        for char_idx in range(start_char, end_char):
-            if char_idx in char_to_token:
-                token_idx = char_to_token[char_idx]
-                if token_idx != -1:  # Not a space
-                    if first_token:
-                        bio_labels[token_idx] = f"B-{entity_type}"
-                        first_token = False
-                    else:
-                        bio_labels[token_idx] = f"I-{entity_type}"
-    
+
+    for start_char, end_char, label in spans:
+        first = True
+
+        for i, (start, end) in enumerate(offsets):
+            # Skip special tokens like [CLS], [SEP]
+            if start == end == 0:
+                continue
+
+            # Check overlap between token and entity span
+            if start < end_char and end > start_char:
+                if first:
+                    bio_labels[i] = f"B-{label}"
+                    first = False
+                else:
+                    bio_labels[i] = f"I-{label}"
+
     return tokens, bio_labels
 
 
 def prepare_dataset(csv_file, output_file):
-    """
-    Convert a CSV file into BERT-ready format with BIO labels.
-    
-    Args:
-        csv_file: Path to input CSV (e.g., group_training.csv)
-        output_file: Path to save the prepared data as JSONL
-    """
-    
     print(f"Loading {csv_file}...")
     df = pd.read_csv(csv_file)
 
-    # The raw dataset uses source_text, so we normalize it to text here.
     if "text" not in df.columns and "source_text" in df.columns:
         df["text"] = df["source_text"]
-    
-    # Parse the span labels
+
     df["span_labels_parsed"] = df["span_labels"].apply(parse_span_labels)
-    
+
     prepared_data = []
-    
-    for idx, row in df.iterrows():
-        text = row.get("text", row.get("source_text", ""))
+
+    for _, row in df.iterrows():
+        text = row.get("text", "")
         spans = row.get("span_labels_parsed", [])
-        
-        if not text or len(text) == 0:
+
+        if not text:
             continue
-        
-        # Convert to BIO format
-        tokens, bio_labels = character_spans_to_bio_labels(text, spans)
-        
-        # Only keep examples with at least some tokens
-        if len(tokens) > 0:
-            prepared_data.append({
-                "tokens": tokens,
-                "ner_tags": bio_labels,
-                "id": row.get("id", ""),
-                "language": row.get("language", "")
-            })
-    
-    # Save to JSONL format (one JSON object per line)
+
+        tokens, labels = tokenize_and_align_labels(text, spans)
+
+        prepared_data.append({
+            "tokens": tokens,
+            "ner_tags": labels,
+            "id": row.get("id", ""),
+            "language": row.get("language", "")
+        })
+
     print(f"Saving {len(prepared_data)} examples to {output_file}...")
-    with open(output_file, 'w') as f:
+
+    with open(output_file, "w", encoding="utf-8") as f:
         for item in prepared_data:
-            f.write(json.dumps(item) + '\n')
-    
-    print(f"Done! Saved to {output_file}")
+            f.write(json.dumps(item) + "\n")
+
+    print("Done!")
     return prepared_data
 
 
 if __name__ == "__main__":
-    # Convert each split
-    data_dir = Path("/Users/evwu/Documents/Repositories/ml_project_PI_redaction")
     
+    start_time = time.time()
+    data_dir = Path("")
+
     print("=" * 60)
     print("PREPARING TRAINING DATA")
     print("=" * 60)
@@ -138,7 +129,7 @@ if __name__ == "__main__":
         data_dir / "group_training.csv",
         data_dir / "train_bio.jsonl"
     )
-    
+
     print("\n" + "=" * 60)
     print("PREPARING VALIDATION DATA")
     print("=" * 60)
@@ -146,7 +137,7 @@ if __name__ == "__main__":
         data_dir / "group_validation.csv",
         data_dir / "val_bio.jsonl"
     )
-    
+
     print("\n" + "=" * 60)
     print("PREPARING TEST DATA")
     print("=" * 60)
@@ -154,7 +145,7 @@ if __name__ == "__main__":
         data_dir / "group_testing.csv",
         data_dir / "test_bio.jsonl"
     )
-    
-    print("\n" + "=" * 60)
-    print("ALL DATA PREPARED!")
-    print("=" * 60)
+
+    print("\nALL DATA PREPARED!")
+    end_time = time.time()
+    print(end_time - start_time)
