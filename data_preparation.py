@@ -118,7 +118,6 @@ def prepare_dataset(csv_file, output_file):
 
 
 if __name__ == "__main__":
-    
     start_time = time.time()
     data_dir = Path("")
 
