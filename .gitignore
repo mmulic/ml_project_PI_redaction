@@ -1,0 +1,39 @@
+# Local environments
+venv/
+.venv/
+
+# Python cache and build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Editor and OS files
+.DS_Store
+.vscode/
+.idea/
+
+# Generated datasets and model outputs
+filtered_english_and_spanish_rows.csv
+group_training.csv
+group_validation.csv
+group_testing.csv
+merged_dataset.csv
+train_bio.jsonl
+val_bio.jsonl
+test_bio.jsonl
+spacy_predictions.jsonl
+spacy_metrics.json
+bert_model/
+
+# Logs
+*.log

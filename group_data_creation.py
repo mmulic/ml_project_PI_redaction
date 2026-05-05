@@ -58,6 +58,10 @@ def extract_group_id(row_id):
 
 filtered_df = filtered_df.copy()
 
+# Keep a standard text column for downstream scripts.
+if "text" not in filtered_df.columns and "source_text" in filtered_df.columns:
+    filtered_df["text"] = filtered_df["source_text"]
+
 filtered_df["span_labels_parsed"] = filtered_df["span_labels"].apply(parse_span_labels)
 filtered_df["label_types"] = filtered_df["span_labels_parsed"].apply(extract_types)
 
