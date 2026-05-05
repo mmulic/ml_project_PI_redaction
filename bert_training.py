@@ -75,8 +75,8 @@ def create_label_mapping(train_file, val_file, test_file):
     print(f"Found {len(label_list)} unique labels: {label_list}")
     return label2id, id2label, label_list
 
-
-def tokenize_and_align_labels(examples, tokenizer, label2id, max_length=512):
+# changed max length to 256 instead of 512
+def tokenize_and_align_labels(examples, tokenizer, label2id, max_length=256):
     """
     Tokenize text with BERT's tokenizer and align labels.
     
