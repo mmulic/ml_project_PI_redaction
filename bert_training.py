@@ -26,6 +26,7 @@ from transformers import (
 )
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import warnings
+import os
 warnings.filterwarnings('ignore')
 
 # Device setup (prefer CUDA, then Apple Silicon MPS, then CPU)
@@ -76,7 +77,7 @@ def create_label_mapping(train_file, val_file, test_file):
     return label2id, id2label, label_list
 
 
-def tokenize_and_align_labels(examples, tokenizer, label2id, max_length=512):
+def tokenize_and_align_labels(examples, tokenizer, label2id, max_length=200):
     """
     Tokenize text with BERT's tokenizer and align labels.
     
@@ -92,7 +93,7 @@ def tokenize_and_align_labels(examples, tokenizer, label2id, max_length=512):
         truncation=True,
         is_split_into_words=True,
         max_length=max_length,
-        padding='max_length',
+        padding=False,
         return_tensors=None
     )
     
@@ -153,7 +154,7 @@ if __name__ == "__main__":
     print("BERT TRAINING FOR PII DETECTION")
     print("=" * 60)
     
-    data_dir = Path("/Users/evwu/Documents/Repositories/ml_project_PI_redaction")
+    data_dir = Path("")
     model_output_dir = data_dir / "bert_model"
     
     # Step 1: Load data and create label mapping
@@ -178,7 +179,7 @@ if __name__ == "__main__":
     print("\nStep 2: Loading BERT tokenizer and model...")
     print("-" * 60)
     
-    model_name = "bert-base-uncased"
+    model_name = "distilbert-base-multilingual-cased"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForTokenClassification.from_pretrained(
         model_name,
@@ -186,6 +187,9 @@ if __name__ == "__main__":
         id2label=id2label,
         label2id=label2id
     ).to(device)
+
+    for param in model.distilbert.parameters():
+        param.requires_grad = False
     
     print(f"Model: {model_name}")
     print(f"Number of parameters: {model.num_parameters():,}")
@@ -226,22 +230,22 @@ if __name__ == "__main__":
     
     training_args = TrainingArguments(
         output_dir=str(model_output_dir),
-        num_train_epochs=3,
-        per_device_train_batch_size=32 if device.type == "cuda" else 8,  # Smaller for CPU
-        per_device_eval_batch_size=32 if device.type == "cuda" else 8,
-        gradient_accumulation_steps=2 if device.type == "cuda" else 4,  # Simulate larger batch
+        num_train_epochs=1,
+        per_device_train_batch_size=32 if device.type == "cuda" else 16,  # Smaller for CPU
+        per_device_eval_batch_size=32 if device.type == "cuda" else 16,
+        gradient_accumulation_steps=2 if device.type == "cuda" else 1,  # Simulate larger batch
         eval_strategy="epoch",
         save_strategy="epoch",
         learning_rate=2e-5,
         weight_decay=0.01,
-        logging_steps=50,  # Log more frequently to monitor progress
+        logging_steps=200,  # Log more frequently to monitor progress
         save_total_limit=1,
         load_best_model_at_end=True,
         metric_for_best_model="f1",
         fp16=device.type == "cuda",  # Mixed precision for CUDA only
         optim="adamw_torch",  # More efficient optimizer
         max_grad_norm=1.0,
-        warmup_steps=100,
+        warmup_steps=0,
     )
     
     data_collator = DataCollatorForTokenClassification(tokenizer)
