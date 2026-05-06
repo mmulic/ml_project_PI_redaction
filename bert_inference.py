@@ -1,282 +1,236 @@
-"""
-BERT Inference and Comparison with SpaCy
-This script runs the fine-tuned BERT model on test data and compares it
-side-by-side with the SpaCy baseline.
-
-The comparison shows which model is better for your PII detection task.
-"""
-
 import json
 import torch
 import numpy as np
-import pandas as pd
 from pathlib import Path
-from transformers import AutoTokenizer, AutoModelForTokenClassification, pipeline
+from transformers import AutoTokenizer, AutoModelForTokenClassification
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import warnings
-warnings.filterwarnings('ignore')
+
+warnings.filterwarnings("ignore")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 
 def load_jsonl_data(jsonl_file):
-    """Load data from JSONL file."""
     data = []
-    with open(jsonl_file, 'r') as f:
+    with open(jsonl_file, "r", encoding="utf-8") as f:
         for line in f:
             data.append(json.loads(line))
     return data
 
 
-def run_bert_inference(model_dir, test_jsonl, test_csv, output_file):
+def align_predictions(word_ids, pred_ids, id2label):
     """
-    Run the fine-tuned BERT model on test data and evaluate.
-    
-    Args:
-        model_dir: Directory containing the saved BERT model
-        test_jsonl: Path to prepared test data (BIO format)
-        test_csv: Path to original test CSV (for reference)
-        output_file: Where to save predictions
-    
-    Returns:
-        metrics: Dictionary with precision, recall, F1, accuracy
-        predictions: List of predictions for each example
+    Convert subword-level predictions -> word-level labels
     """
-    
-    print("Loading BERT model...")
+    preds = []
+    prev_word_id = None
+
+    for idx, word_id in enumerate(word_ids):
+        if word_id is None:
+            continue
+
+        # take first subword prediction per token
+        if word_id != prev_word_id:
+            preds.append(id2label[pred_ids[idx]])
+            prev_word_id = word_id
+
+    return preds
+
+
+def run_bert_inference(model_dir, test_jsonl, output_file):
+    print("Loading model...")
+
     model = AutoModelForTokenClassification.from_pretrained(model_dir).to(device)
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    
-    # Load label mappings
-    with open(model_dir / "label2id.json", 'r') as f:
-        label2id = json.load(f)
-    with open(model_dir / "id2label.json", 'r') as f:
-        id2label = json.load(f)
-    
-    id2label = {int(k): v for k, v in id2label.items()}  # Convert string keys to int
-    
-    # Load test data
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
+
+    id2label = model.config.id2label
+
     test_data = load_jsonl_data(test_jsonl)
-    test_df = pd.read_csv(test_csv)
-    if "text" not in test_df.columns and "source_text" in test_df.columns:
-        test_df["text"] = test_df["source_text"]
-    
-    # Create NER pipeline with BERT
-    ner_pipeline = pipeline(
-        "token-classification",
-        model=model,
-        tokenizer=tokenizer,
-        device=0 if torch.cuda.is_available() else -1,
-        aggregation_strategy="simple"  # Keep tokens separate
-    )
-    
-    all_true_labels = []
-    all_pred_labels = []
+
+    all_true = []
+    all_pred = []
     predictions = []
-    
-    print(f"Running BERT inference on {len(test_data)} examples...")
-    
-    model.eval()
-    with torch.no_grad():
-        for idx, item in enumerate(test_data):
-            tokens = item["tokens"]
-            true_ner_tags = item["ner_tags"]
-            text = " ".join(tokens)
-            
-            # Skip if empty
-            if not tokens:
-                continue
-            
-            # Run BERT
-            bert_output = ner_pipeline(text)
-            
-            # Convert BERT output to BIO labels
-            # BERT output is at token level, we need to align with our tokens
-            pred_ner_tags = ["O"] * len(tokens)
-            
-            for bert_entity in bert_output:
-                word = bert_entity["word"]
-                label = bert_entity["entity"]
-                # entity format from pipeline: "B-PERSON", "I-PERSON", etc.
-                
-                # Find which token this corresponds to
-                # This is a simplified alignment
-                for token_idx, token in enumerate(tokens):
-                    if token.lower() in word.lower() or word.lower() in token.lower():
-                        if pred_ner_tags[token_idx] == "O":
-                            pred_ner_tags[token_idx] = label
-                        break
-            
-            # Collect metrics
-            all_true_labels.extend(true_ner_tags)
-            all_pred_labels.extend(pred_ner_tags)
-            
-            predictions.append({
-                "tokens": tokens,
-                "true_labels": true_ner_tags,
-                "pred_labels": pred_ner_tags,
-                "text": text,
-            })
-            
-            if (idx + 1) % 50 == 0:
-                print(f"  Processed {idx + 1}/{len(test_data)} examples...")
-    
-    # Calculate metrics
-    label_set = set(all_true_labels + all_pred_labels)
-    label_to_id = {label: i for i, label in enumerate(sorted(label_set))}
-    
-    true_numeric = [label_to_id[label] for label in all_true_labels]
-    pred_numeric = [label_to_id[label] for label in all_pred_labels]
-    
+
+    # =========================
+    # NEW: tracking containers
+    # =========================
+    class_stats = {}   # label-level metrics
+    lang_stats = {}    # language-level metrics
+
+    print(f"Running inference on {len(test_data)} examples...")
+
+    for idx, item in enumerate(test_data):
+        tokens = item["tokens"]
+        true_labels = item["ner_tags"]
+        language = item.get("language", "unknown")
+
+        if not tokens:
+            continue
+
+        encodings = tokenizer(
+            tokens,
+            is_split_into_words=True,
+            return_tensors="pt",
+            truncation=True
+        ).to(device)
+
+        with torch.no_grad():
+            outputs = model(**encodings)
+
+        logits = outputs.logits
+        pred_ids = torch.argmax(logits, dim=-1).squeeze().cpu().numpy()
+
+        word_ids = encodings.word_ids()
+        pred_labels = align_predictions(word_ids, pred_ids, id2label)
+
+        min_len = min(len(true_labels), len(pred_labels))
+        true_labels = true_labels[:min_len]
+        pred_labels = pred_labels[:min_len]
+
+        all_true.extend(true_labels)
+        all_pred.extend(pred_labels)
+
+        predictions.append({
+            "tokens": tokens,
+            "true_labels": true_labels,
+            "pred_labels": pred_labels,
+            "language": language
+        })
+
+        # =========================
+        # NEW: per-language tracking
+        # =========================
+        if language not in lang_stats:
+            lang_stats[language] = {"true": [], "pred": []}
+
+        lang_stats[language]["true"].extend(true_labels)
+        lang_stats[language]["pred"].extend(pred_labels)
+
+        # =========================
+        # NEW: per-class tracking
+        # =========================
+        for t, p in zip(true_labels, pred_labels):
+            if t not in class_stats:
+                class_stats[t] = {"true": [], "pred": []}
+            class_stats[t]["true"].append(t)
+            class_stats[t]["pred"].append(p)
+
+        if (idx + 1) % 50 == 0:
+            print(f"Processed {idx + 1}/{len(test_data)}")
+
+    # =========================
+    # GLOBAL METRICS
+    # =========================
+    labels = list(id2label.values())
+    label_to_id = {l: i for i, l in enumerate(labels)}
+
+    y_true = [label_to_id.get(l, 0) for l in all_true]
+    y_pred = [label_to_id.get(l, 0) for l in all_pred]
+
     metrics = {
-        "accuracy": accuracy_score(true_numeric, pred_numeric),
-        "precision": precision_score(true_numeric, pred_numeric, average='weighted', zero_division=0),
-        "recall": recall_score(true_numeric, pred_numeric, average='weighted', zero_division=0),
-        "f1": f1_score(true_numeric, pred_numeric, average='weighted', zero_division=0),
+        "accuracy": accuracy_score(y_true, y_pred),
+        "precision": precision_score(y_true, y_pred, average="weighted", zero_division=0),
+        "recall": recall_score(y_true, y_pred, average="weighted", zero_division=0),
+        "f1": f1_score(y_true, y_pred, average="weighted", zero_division=0),
         "num_examples": len(predictions),
-        "num_tokens": len(all_true_labels)
+        "num_tokens": len(all_true)
     }
-    
-    # Save predictions
-    print(f"Saving predictions to {output_file}...")
-    with open(output_file, 'w') as f:
-        for pred in predictions:
-            f.write(json.dumps(pred) + '\n')
-    
-    return metrics, predictions
 
+    print("\n" + "=" * 60)
+    print("GLOBAL METRICS")
+    print("=" * 60)
+    print(f"Accuracy : {metrics['accuracy']:.4f}")
+    print(f"Precision: {metrics['precision']:.4f}")
+    print(f"Recall   : {metrics['recall']:.4f}")
+    print(f"F1 Score : {metrics['f1']:.4f}")
 
-def compare_models(data_dir):
-    """
-    Load results from both SpaCy and BERT and create a comparison.
-    """
-    
-    print("\nLoading model results...")
-    
-    # Load metrics
-    with open(data_dir / "spacy_metrics.json", 'r') as f:
-        spacy_metrics = json.load(f)
-    with open(data_dir / "bert_metrics.json", 'r') as f:
-        bert_metrics = json.load(f)
-    
-    # Create comparison table
-    print("\n" + "=" * 80)
-    print("MODEL COMPARISON: SPACY vs BERT")
-    print("=" * 80)
-    
-    metrics_to_compare = ["accuracy", "precision", "recall", "f1"]
-    
-    print(f"\n{'Metric':<15} {'SpaCy':<20} {'BERT':<20} {'Winner':<15}")
-    print("-" * 80)
-    
-    for metric in metrics_to_compare:
-        spacy_val = spacy_metrics.get(metric, 0)
-        bert_val = bert_metrics.get(metric, 0)
-        
-        if bert_val > spacy_val:
-            winner = "BERT ✓"
-        elif spacy_val > bert_val:
-            winner = "SpaCy ✓"
-        else:
-            winner = "Tie"
-        
-        print(f"{metric:<15} {spacy_val:<20.4f} {bert_val:<20.4f} {winner:<15}")
-    
-    print("-" * 80)
-    print(f"{'Examples':<15} {spacy_metrics.get('num_examples', 0):<20} {bert_metrics.get('num_examples', 0):<20}")
-    print(f"{'Tokens':<15} {spacy_metrics.get('num_tokens', 0):<20} {bert_metrics.get('num_tokens', 0):<20}")
-    print("=" * 80)
-    
-    # Summary
-    print("\nSUMMARY:")
-    print("-" * 80)
-    
-    bert_wins = sum(1 for metric in metrics_to_compare if bert_metrics.get(metric, 0) > spacy_metrics.get(metric, 0))
-    spacy_wins = sum(1 for metric in metrics_to_compare if spacy_metrics.get(metric, 0) > bert_metrics.get(metric, 0))
-    
-    if bert_wins > spacy_wins:
-        print(f"🎯 BERT is the winner ({bert_wins} out of {len(metrics_to_compare)} metrics)")
-    elif spacy_wins > bert_wins:
-        print(f"🎯 SpaCy is the winner ({spacy_wins} out of {len(metrics_to_compare)} metrics)")
-    else:
-        print("🎯 It's a tie! Both models perform similarly")
-    
-    print("-" * 80)
-    
-    # Recommendations
-    print("\nRECOMMENDATIONS:")
-    if bert_metrics["f1"] > spacy_metrics["f1"]:
-        print("✓ Use BERT for production PII detection")
-    else:
-        print("✓ Use SpaCy (faster and simpler)")
-    print("✓ Consider ensemble: run both and flag when they disagree")
-    
-    return {
-        "spacy": spacy_metrics,
-        "bert": bert_metrics,
-        "winner": "bert" if bert_wins > spacy_wins else "spacy" if spacy_wins > bert_wins else "tie"
-    }
+    # =========================
+    # PER-CLASS METRICS
+    # =========================
+    print("\n" + "=" * 60)
+    print("PER-CLASS METRICS")
+    print("=" * 60)
+
+    per_class_metrics = {}
+
+    for label, data in class_stats.items():
+        yt = [1 if x == label else 0 for x in data["true"]]
+        yp = [1 if x == label else 0 for x in data["pred"]]
+
+        per_class_metrics[label] = {
+            "accuracy": accuracy_score(yt, yp),
+            "precision": precision_score(yt, yp, zero_division=0),
+            "recall": recall_score(yt, yp, zero_division=0),
+            "f1": f1_score(yt, yp, zero_division=0),
+            "support": len(yt)
+        }
+
+        print(f"\n{label}")
+        print(f"  Precision: {per_class_metrics[label]['precision']:.4f}")
+        print(f"  Recall   : {per_class_metrics[label]['recall']:.4f}")
+        print(f"  F1       : {per_class_metrics[label]['f1']:.4f}")
+        print(f"  Support  : {per_class_metrics[label]['support']}")
+
+    # =========================
+    # PER-LANGUAGE METRICS
+    # =========================
+    print("\n" + "=" * 60)
+    print("PER-LANGUAGE METRICS")
+    print("=" * 60)
+
+    per_language_metrics = {}
+
+    for lang, data in lang_stats.items():
+        yt = [label_to_id.get(l, 0) for l in data["true"]]
+        yp = [label_to_id.get(l, 0) for l in data["pred"]]
+
+        per_language_metrics[lang] = {
+            "accuracy": accuracy_score(yt, yp),
+            "precision": precision_score(yt, yp, average="weighted", zero_division=0),
+            "recall": recall_score(yt, yp, average="weighted", zero_division=0),
+            "f1": f1_score(yt, yp, average="weighted", zero_division=0),
+            "support": len(yt)
+        }
+
+        print(f"\n{lang}")
+        print(f"  Accuracy : {per_language_metrics[lang]['accuracy']:.4f}")
+        print(f"  Precision: {per_language_metrics[lang]['precision']:.4f}")
+        print(f"  Recall   : {per_language_metrics[lang]['recall']:.4f}")
+        print(f"  F1       : {per_language_metrics[lang]['f1']:.4f}")
+        print(f"  Support  : {per_language_metrics[lang]['support']}")
+
+    # =========================
+    # SAVE RESULTS
+    # =========================
+    with open(output_file, "w", encoding="utf-8") as f:
+        for p in predictions:
+            f.write(json.dumps(p) + "\n")
+
+    return metrics, per_class_metrics, per_language_metrics, predictions
 
 
 if __name__ == "__main__":
-    print("=" * 80)
-    print("BERT INFERENCE AND MODEL COMPARISON")
-    print("=" * 80)
-    
-    data_dir = Path("/Users/evwu/Documents/Repositories/ml_project_PI_redaction")
+    print("=" * 60)
+    print("BERT TOKEN-LEVEL INFERENCE (FIXED)")
+    print("=" * 60)
+
+    data_dir = Path("")
     model_dir = data_dir / "bert_model"
-    
-    # Check if BERT model exists
+
     if not model_dir.exists():
-        print(f"ERROR: BERT model not found at {model_dir}")
-        print("Please run bert_training.py first to train the model.")
+        print("ERROR: model not found")
         exit(1)
-    
-    # Run BERT inference
-    print("\nStep 1: Running BERT inference...")
-    print("-" * 80)
-    
-    bert_metrics, bert_predictions = run_bert_inference(
+
+    bert_metrics, _ = run_bert_inference(
         model_dir,
         data_dir / "test_bio.jsonl",
-        data_dir / "group_testing.csv",
         data_dir / "bert_predictions.jsonl"
     )
-    
-    print("\nBERT RESULTS:")
-    print("-" * 80)
-    print(f"Accuracy:  {bert_metrics['accuracy']:.4f}")
-    print(f"Precision: {bert_metrics['precision']:.4f}")
-    print(f"Recall:    {bert_metrics['recall']:.4f}")
-    print(f"F1 Score:  {bert_metrics['f1']:.4f}")
-    print(f"Examples:  {bert_metrics['num_examples']}")
-    print(f"Tokens:    {bert_metrics['num_tokens']}")
-    print("-" * 80)
-    
-    # Save BERT metrics
-    with open(data_dir / "bert_metrics.json", 'w') as f:
+
+    with open(data_dir / "bert_metrics.json", "w") as f:
         json.dump(bert_metrics, f, indent=2)
-    
-    # Compare models
-    print("\nStep 2: Comparing SpaCy and BERT...")
-    print("-" * 80)
-    
-    if (data_dir / "spacy_metrics.json").exists():
-        comparison = compare_models(data_dir)
-        
-        # Save comparison
-        with open(data_dir / "model_comparison.json", 'w') as f:
-            json.dump(comparison, f, indent=2)
-        
-        print("\nComparison saved to model_comparison.json")
-    else:
-        print("SpaCy results not found. Run spacy_baseline.py first for comparison.")
-    
-    print("\n" + "=" * 80)
-    print("INFERENCE COMPLETE!")
-    print("=" * 80)
-    print(f"BERT predictions: bert_predictions.jsonl")
-    print(f"BERT metrics: bert_metrics.json")
-    if (data_dir / "model_comparison.json").exists():
-        print(f"Comparison: model_comparison.json")
+
+    print("\nSaved: bert_metrics.json")
+    print("Saved: bert_predictions.jsonl")
