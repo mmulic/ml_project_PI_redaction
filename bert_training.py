@@ -187,9 +187,6 @@ if __name__ == "__main__":
         id2label=id2label,
         label2id=label2id
     ).to(device)
-
-    for param in model.distilbert.parameters():
-        param.requires_grad = False
     
     print(f"Model: {model_name}")
     print(f"Number of parameters: {model.num_parameters():,}")
