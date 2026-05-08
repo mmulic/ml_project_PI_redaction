@@ -79,7 +79,7 @@ def create_label_mapping(train_file, val_file, test_file):
 # TOKENIZATION
 # ============================================================
 
-def tokenize_and_align_labels(examples, tokenizer, label2id, max_length=50):
+def tokenize_and_align_labels(examples, tokenizer, label2id, max_length=200):
     """
     Tokenize and align labels for token classification.
     """
