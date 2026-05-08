@@ -18,7 +18,7 @@ import time
 
 # Load tokenizer
 tokenizer = AutoTokenizer.from_pretrained(
-    "distilbert-base-multilingual-cased",
+    "bert-base-multilingual-cased",
     use_fast=True
 )
 print(type(tokenizer))
