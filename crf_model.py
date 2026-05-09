@@ -2,59 +2,110 @@ import pandas as pd
 import numpy as np
 import ast
 import time
+import psutil
+import os
+import joblib
+
 from transformers import AutoTokenizer
 from sklearn_crfsuite import CRF
-from sklearn.metrics import classification_report, accuracy_score
-from collections import defaultdict
-from seqeval.metrics import classification_report as seq_classification_report
-from seqeval.metrics import f1_score, precision_score, recall_score
+from sklearn.metrics import (
+    classification_report,
+    accuracy_score,
+    precision_recall_fscore_support,
+    f1_score as sk_f1_score
+)
 
-# -----------------------------
-# Global timer helper
-# -----------------------------
-def log_time(start, message):
-    elapsed = time.time() - start
-    print(f"[TIME] {message}: {elapsed:.2f} sec")
-    return time.time()
+from collections import defaultdict
+
+from seqeval.metrics import (
+    classification_report as seq_classification_report,
+    f1_score,
+    precision_score,
+    recall_score
+)
+
+process = psutil.Process(os.getpid())
+
+
+def log_time_and_cpu(start_time, start_cpu, message):
+
+    elapsed = time.time() - start_time
+
+    end_cpu = process.cpu_times()
+
+    cpu_used = (
+        (end_cpu.user - start_cpu.user)
+        + (end_cpu.system - start_cpu.system)
+    )
+
+    cpu_percent = (
+        (cpu_used / elapsed) * 100
+        if elapsed > 0 else 0
+    )
+
+    print(
+        f"[TIME] {message}: "
+        f"{elapsed:.2f} sec | "
+        f"CPU time: {cpu_used:.2f} sec | "
+        f"Approx CPU usage: {cpu_percent:.2f}%"
+    )
+
+    return time.time(), process.cpu_times()
 
 
 global_start = time.time()
+global_cpu = process.cpu_times()
 
-# -----------------------------
-# Load tokenizer
-# -----------------------------
+
 print("Loading tokenizer...")
+
 start = time.time()
+start_cpu = process.cpu_times()
 
-tokenizer = AutoTokenizer.from_pretrained("bert-base-multilingual-cased")
+tokenizer = AutoTokenizer.from_pretrained(
+    "bert-base-multilingual-cased"
+)
 
-start = log_time(start, "Tokenizer loaded")
+start, start_cpu = log_time_and_cpu(
+    start,
+    start_cpu,
+    "Tokenizer loaded"
+)
 
+def flatten(y):
+    return [label for seq in y for label in seq]
 
-# -----------------------------
-# Helper: Convert spans → BIO labels
-# -----------------------------
+# =========================================================
+# HELPER: CONVERT SPANS -> BIO LABELS
+# =========================================================
 def create_bio_labels(text, tokens, offsets, span_labels):
+
     labels = ["O"] * len(tokens)
 
     for start_span, end_span, label in span_labels:
+
+        inside = False
+
         for i, (tok_start, tok_end) in enumerate(offsets):
+
             if tok_start >= end_span or tok_end <= start_span:
                 continue
 
             if tok_start >= start_span and tok_end <= end_span:
-                if labels[i] == "O":
+
+                if not inside:
                     labels[i] = f"B-{label}"
+                    inside = True
                 else:
                     labels[i] = f"I-{label}"
 
     return labels
 
-
-# -----------------------------
-# Feature extraction
-# -----------------------------
+# =========================================================
+# FEATURE EXTRACTION
+# =========================================================
 def token2features(tokens, i):
+
     token = tokens[i]
 
     features = {
@@ -70,18 +121,23 @@ def token2features(tokens, i):
     }
 
     if i > 0:
-        prev = tokens[i-1]
+        prev = tokens[i - 1]
+
         features.update({
             '-1:word.lower()': prev.lower(),
         })
+
     else:
         features['BOS'] = True
 
-    if i < len(tokens)-1:
-        nxt = tokens[i+1]
+    if i < len(tokens) - 1:
+
+        nxt = tokens[i + 1]
+
         features.update({
             '+1:word.lower()': nxt.lower(),
         })
+
     else:
         features['EOS'] = True
 
@@ -89,24 +145,31 @@ def token2features(tokens, i):
 
 
 def sent2features(tokens):
-    return [token2features(tokens, i) for i in range(len(tokens))]
+    return [token2features(tokens, i)
+            for i in range(len(tokens))]
 
-
-# -----------------------------
-# Preprocess dataset
-# -----------------------------
+# =========================================================
+# PREPROCESS DATASET
+# =========================================================
 def preprocess(df, name="dataset"):
+
     print(f"\nPreprocessing {name}...")
+
     start = time.time()
+    start_cpu = process.cpu_times()
 
     X, y, languages = [], [], []
 
     for idx, row in df.iterrows():
+
         if idx % 100 == 0:
             print(f"  Processed {idx} rows...")
 
         text = row["source_text"]
-        span_labels = ast.literal_eval(row["span_labels"])
+
+        span_labels = ast.literal_eval(
+            row["span_labels"]
+        )
 
         encoding = tokenizer(
             text,
@@ -115,130 +178,205 @@ def preprocess(df, name="dataset"):
             truncation=True
         )
 
-        tokens = tokenizer.convert_ids_to_tokens(encoding["input_ids"])
+        tokens = tokenizer.convert_ids_to_tokens(
+            encoding["input_ids"]
+        )
+
         offsets = encoding["offset_mapping"]
 
-        labels = create_bio_labels(text, tokens, offsets, span_labels)
+        labels = create_bio_labels(
+            text,
+            tokens,
+            offsets,
+            span_labels
+        )
 
         X.append(sent2features(tokens))
         y.append(labels)
         languages.append(row["language"])
 
-    log_time(start, f"{name} preprocessing done")
+    log_time_and_cpu(
+        start,
+        start_cpu,
+        f"{name} preprocessing done"
+    )
+
     return X, y, languages
 
+def strip_bio(label):
+    if label.startswith("B-") or label.startswith("I-"):
+        return label[2:]
+    return label
 
-# -----------------------------
-# Load data
-# -----------------------------
 print("\nLoading CSV files...")
+
 start = time.time()
+start_cpu = process.cpu_times()
 
 train_df = pd.read_csv("group_training.csv")
 val_df = pd.read_csv("group_validation.csv")
 test_df = pd.read_csv("group_testing.csv")
 
-start = log_time(start, "CSV loading done")
+start, start_cpu = log_time_and_cpu(
+    start,
+    start_cpu,
+    "CSV loading done"
+)
 
 
-# -----------------------------
-# Preprocessing
-# -----------------------------
-X_train, y_train, lang_train = preprocess(train_df, "train")
-X_val, y_val, lang_val = preprocess(val_df, "validation")
-X_test, y_test, lang_test = preprocess(test_df, "test")
+X_train, y_train, lang_train = preprocess(
+    train_df,
+    "train"
+)
 
+X_val, y_val, lang_val = preprocess(
+    val_df,
+    "validation"
+)
 
-# -----------------------------
-# Train CRF model
-# -----------------------------
-print("\nTraining CRF model...")
+X_test, y_test, lang_test = preprocess(
+    test_df,
+    "test"
+)
+
+# =========================================================
+# TRAINING (SINGLE RUN, ITERATIONS VARY)
+# =========================================================
+print("\nTraining CRF model (single run, 30 iterations)...")
+
 start = time.time()
+start_cpu = process.cpu_times()
 
 crf = CRF(
     algorithm='lbfgs',
-    max_iterations=75, #75 or 125       
-    c1=0.3,                      # L1 regularisation
-    c2=0.5,                      # L2 regularisation
+    max_iterations=40,
+    epsilon=1e-5,
+    c1=0.3,
+    c2=0.5,
     all_possible_transitions=True,
     verbose=True
 )
 
 crf.fit(X_train, y_train)
 
-start = log_time(start, "CRF training complete")
+joblib.dump(crf, "v2_best_crf_model.pkl")
+
+log_time_and_cpu(
+    start,
+    start_cpu,
+    "CRF training complete"
+)
 
 
-# -----------------------------
-# Prediction
-# -----------------------------
+crf = joblib.load("best_crf_model.pkl")
+
 print("\nRunning predictions...")
-start = time.time()
 
-y_pred = crf.predict(X_test)
+y_train_pred = crf.predict(X_train)
+y_val_pred = crf.predict(X_val)
+y_test_pred = crf.predict(X_test)
 
-start = log_time(start, "Prediction complete")
+# =========================================================
+# METRICS HELPERS
+# =========================================================
+def print_metrics(y_true, y_pred, title="Dataset"):
+
+    print("\n========================================")
+    print(f"METRICS: {title}")
+    print("========================================")
+
+    # flatten
+    y_true_flat = flatten(y_true)
+    y_pred_flat = flatten(y_pred)
+
+    # 🔥 merge B- and I- labels
+    y_true_flat = [strip_bio(l) for l in y_true_flat]
+    y_pred_flat = [strip_bio(l) for l in y_pred_flat]
+
+    print("\nAccuracy:")
+    print(accuracy_score(y_true_flat, y_pred_flat))
+
+    print("\nToken-level Classification Report:")
+    print(classification_report(
+        y_true_flat,
+        y_pred_flat,
+        zero_division=0
+    ))
+
+    labels = sorted(list(set(y_true_flat) | set(y_pred_flat)))
+
+    precision, recall, f1_vals, support = precision_recall_fscore_support(
+        y_true_flat,
+        y_pred_flat,
+        labels=labels,
+        zero_division=0
+    )
+
+    print("\nPer-class metrics:")
+    for l, p, r, f, s in zip(labels, precision, recall, f1_vals, support):
+        print(f"{l:15} | P={p:.4f} | R={r:.4f} | F1={f:.4f} | Support={s}")
+
+    filtered_f1 = [f for l, f in zip(labels, f1_vals) if l != "O"]
+    print(f"\nMacro F1 (no O): {np.mean(filtered_f1):.4f}")
 
 
-# -----------------------------
-# Flatten for metrics
-# -----------------------------
-def flatten(y):
-    return [label for seq in y for label in seq]
+def evaluate_by_language(y_true, y_pred, languages, title="Dataset"):
 
-y_test_flat = flatten(y_test)
-y_pred_flat = flatten(y_pred)
+    print("\n========================================")
+    print(f"LANGUAGE-WISE METRICS: {title}")
+    print("========================================")
 
+    from collections import defaultdict
 
-# -----------------------------
-# Metrics
-# -----------------------------
-print("\nEvaluating metrics...")
-start = time.time()
-
-print("\n=== Overall Metrics ===")
-print("Accuracy:", accuracy_score(y_test_flat, y_pred_flat))
-print(classification_report(y_test_flat, y_pred_flat))
-
-print("\n=== SeqEval Metrics ===")
-print("Precision:", precision_score(y_test, y_pred))
-print("Recall:", recall_score(y_test, y_pred))
-print("F1:", f1_score(y_test, y_pred))
-
-print(seq_classification_report(y_test, y_pred))
-
-start = log_time(start, "Evaluation complete")
-
-
-# -----------------------------
-# Language-wise metrics
-# -----------------------------
-def evaluate_by_language(y_true, y_pred, languages):
-    print("\nEvaluating by language...")
-    start = time.time()
-
-    lang_map = defaultdict(lambda: {"true": [], "pred": []})
+    lang_map = defaultdict(lambda: {"true": [], "pred": [], "count": 0})
 
     for yt, yp, lang in zip(y_true, y_pred, languages):
+
+        if lang is None:
+            lang = "unknown"
+        else:
+            lang = str(lang).strip().lower()
+
+        if lang in ["en", "eng", "english"]:
+            lang = "english"
+        elif lang in ["es", "spa", "spanish"]:
+            lang = "spanish"
+
         lang_map[lang]["true"].append(yt)
         lang_map[lang]["pred"].append(yp)
+        lang_map[lang]["count"] += 1
 
-    for lang in lang_map:
-        print(f"\n=== Language: {lang} ===")
-        yt = lang_map[lang]["true"]
-        yp = lang_map[lang]["pred"]
+    print("\nDetected languages:")
+    for lang, data in lang_map.items():
+        print(f"  - {lang}: {data['count']} samples")
 
-        print("Precision:", precision_score(yt, yp))
-        print("Recall:", recall_score(yt, yp))
-        print("F1:", f1_score(yt, yp))
-        print(seq_classification_report(yt, yp))
+    print("\n========================================")
 
-    log_time(start, "Language evaluation complete")
+    for lang, data in sorted(lang_map.items()):
+
+        print(f"\n----- Language: {lang} -----")
+
+        print_metrics(
+            data["true"],
+            data["pred"],
+            title=f"{title} | {lang}"
+        )
+
+# =========================================================
+# EVALUATION: 
+# =========================================================
+print_metrics(y_train, y_train_pred, "TRAIN")
+print_metrics(y_val, y_val_pred, "VALIDATION")
+print_metrics(y_test, y_test_pred, "TEST")
+
+evaluate_by_language(y_train, y_train_pred, lang_train, "TRAIN")
+evaluate_by_language(y_val, y_val_pred, lang_val, "VALIDATION")
+evaluate_by_language(y_test, y_test_pred, lang_test, "TEST")
+
+log_time_and_cpu(
+    global_start,
+    global_cpu,
+    "TOTAL PIPELINE TIME"
+)
 
 
-evaluate_by_language(y_test, y_pred, lang_test)
-
-# -----------------------------
-# Total runtime
-# -----------------------------
-log_time(global_start, "TOTAL PIPELINE TIME")
